@@ -1,0 +1,98 @@
+name: Build / Push Docker images
+
+# Run workflow on tags starting with v (eg. v2, v1.2.0)
+on:
+  push:
+    branches:
+      - main
+    # tags:
+    #   - v*
+
+jobs:
+  strategy-matrix:
+    name: matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: technote-space/get-diff-action@v6
+        with:
+          DIFF_FILTER: "AMR"
+          FILES: Dockerfile
+      - run: echo "path_list:${{ inputs.PATH_LIST }}"
+        shell: bash
+      - id: matrix
+        shell: bash
+        if: env.MATCHED_FILES
+        env:
+          PATH_LIST: ${{ env.MATCHED_FILES }}
+          PATH_LIST_IFS: " "
+          CONTEXT_ATTRIBUTE: context
+          IMAGE_NAME_ATTRIBUTE: image_name
+          BASENAME_TRIM_SUFFIX: true
+          VERSION_ATTRIBUTE: version
+          DIRNAME_TRIM_PREFIX: false
+        run: |
+          IFS="$PATH_LIST_IFS"
+          matrix='{"include":[]}'
+          for path in $PATH_LIST
+          do
+            context=$(dirname $path)
+            image_name=${{ github.repository_owner }}/$(dirname $path | cut -d '/' -f1)
+            image_name=$(echo $image_name | tr '[A-Z]' '[a-z]')
+            version=$(dirname $path | cut -d '/' -f2- | tr '/' '-')-$(git describe --match '[v0-9]*' --always --abbrev=7)
+            version=$(echo $version | tr '[A-Z]' '[a-z]')
+
+            item=$(echo '{}' | jq ". += {\"$CONTEXT_ATTRIBUTE\":\"${context}\", \"$IMAGE_NAME_ATTRIBUTE\":\"${image_name}\", \"$VERSION_ATTRIBUTE\":\"${version}\"}")
+            matrix=$(echo "$matrix" | jq ".include += [ $item ]")
+          done
+
+          echo "final matrix :"
+          echo "$matrix" | jq .
+          echo "matrix=$( echo "${matrix}" | jq -c . )" >> $GITHUB_OUTPUT
+
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [strategy-matrix]
+    if: ${{ ! failure() && ! cancelled() && needs.strategy-matrix.outputs.matrix != '' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.strategy-matrix.outputs.matrix) }}
+    steps:
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: "{{defaultContext}}:${{ matrix.context }}"
+          push: true
+          tags: ghcr.io/${{ matrix.image_name }}:${{ matrix.version }}
+
+      # - name: Push image
+      #   run: |
+      #     IMAGE_ID=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
+
+      #     IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+
+
+      #     VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
+
+
+      #     [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+
+
+      #     [ "$VERSION" == "main" ] && VERSION=latest
+      #     echo IMAGE_ID=$IMAGE_ID
+      #     echo VERSION=$VERSION
+      #     docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
+      #     docker push $IMAGE_ID:$VERSION
